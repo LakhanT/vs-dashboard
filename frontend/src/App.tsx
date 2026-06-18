@@ -11,6 +11,7 @@ import {
   runLiveRefresh,
   syncFnoList,
   uploadFusionMatrix,
+  uploadFyersToken,
   uploadRsiDigger,
 } from "./api";
 import { SheetFiltersPanel } from "./SheetFilters";
@@ -341,6 +342,23 @@ export default function App() {
     }
   }
 
+  async function handleFyersTokenUpload(file: File | null) {
+    if (!file) return;
+    setFyersLoginMsg(null);
+    setError(null);
+    try {
+      const result = await uploadFyersToken(file);
+      if (result.counts.token_ready) {
+        setFyersLoginMsg("Fyers token uploaded — live LTP enabled.");
+      } else {
+        setFyersLoginMsg("Token saved but may be expired — log in on PC and upload again.");
+      }
+      await refreshMeta();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Token upload failed");
+    }
+  }
+
   async function handleUpload(kind: "rsi" | "fusion", file: File | null) {
     if (!file) return;
     setUploadMsg(null);
@@ -610,8 +628,8 @@ export default function App() {
 
       {!hasUniverse && !loading && !pipelineRunning && (
         <div className="shrink-0 border-b border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-800">
-          Start here: open <strong>Data</strong> panel → login Fyers → upload <strong>RSI Digger</strong> → upload{" "}
-          <strong>Fusion Matrix</strong> → Apply filters.
+          Start here: open <strong>Data</strong> panel → upload <strong>token.json</strong> → upload{" "}
+          <strong>RSI Digger</strong> → upload <strong>Fusion Matrix</strong> → Apply filters.
         </div>
       )}
 
@@ -655,24 +673,36 @@ export default function App() {
                   <div className="space-y-1 text-xs text-slate-400">
                     <p className="flex items-center gap-2">
                       <StatusDot ok={fyersReady} />
-                      {fyersReady ? "Token active" : marketData?.fyers.login_in_progress ? "Logging in…" : "Login required"}
+                      {fyersReady ? "Token active" : "Upload token.json"}
                     </p>
                     <p>OHLC: {marketData?.ohlc_source ?? "yahoo"}</p>
                   </div>
-                  {!fyersReady && !marketData?.fyers.login_in_progress ? (
+                  <label className="mt-3 flex cursor-pointer flex-col rounded-lg border border-dashed border-slate-300 p-3 hover:border-sky-400">
+                    <span className="mb-1 text-xs text-slate-500">
+                      Upload <strong>token.json</strong> (from Fyers login on your PC)
+                    </span>
+                    <input
+                      type="file"
+                      accept=".json,application/json"
+                      onChange={(e) => void handleFyersTokenUpload(e.target.files?.[0] ?? null)}
+                      className="text-xs text-sky-600"
+                    />
+                  </label>
+                  {fyersReady && (
+                    <p className="mt-2 text-xs text-emerald-600">✓ Connected — LTP updates live</p>
+                  )}
+                  {fyersLoginMsg && <p className="mt-2 text-xs text-emerald-600">{fyersLoginMsg}</p>}
+                  <details className="mt-2 text-[10px] text-slate-400">
+                    <summary className="cursor-pointer hover:text-slate-600">Login on this PC instead</summary>
                     <button
                       type="button"
                       onClick={() => void handleFyersLogin()}
-                      className="mt-3 w-full rounded-lg bg-sky-50 py-2 text-sm font-medium text-sky-700 ring-1 ring-sky-300 hover:bg-sky-100"
+                      disabled={marketData?.fyers.login_in_progress}
+                      className="mt-2 w-full rounded-lg bg-slate-100 py-1.5 text-xs text-slate-600 hover:bg-slate-200 disabled:opacity-50"
                     >
-                      Login to Fyers
+                      {marketData?.fyers.login_in_progress ? "Logging in…" : "Browser login (local)"}
                     </button>
-                  ) : fyersReady ? (
-                    <p className="mt-2 text-xs text-emerald-600">✓ Connected — LTP updates live</p>
-                  ) : (
-                    <p className="mt-2 text-xs text-amber-600">Waiting for browser login…</p>
-                  )}
-                  {fyersLoginMsg && <p className="mt-2 text-xs text-emerald-600">{fyersLoginMsg}</p>}
+                  </details>
                 </section>
 
                 <section className="rounded-xl border border-slate-200 bg-slate-50 p-3">

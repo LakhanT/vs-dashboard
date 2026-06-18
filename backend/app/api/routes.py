@@ -25,6 +25,9 @@ from app.services.filter_engine import default_preset_rules, get_filter_fields_p
 from app.services.pipeline import create_pipeline_task
 from app.services.fno_sync import sync_fno_flags
 from app.services.fyers import get_access_token, get_fyers_status, trigger_browser_login
+from app.services.fyers_auth import import_fyers_token_bytes
+from app.services.fyers_stream import fyers_stream_service
+from app.services.live_price_service import live_price_service
 from app.services.tasks import (
     get_stats,
     run_full_pipeline,
@@ -200,6 +203,30 @@ async def upload_fusion_matrix(
         filename=file.filename,
         counts=counts,
         refresh_task_id=refresh_task_id,
+    )
+
+
+@router.post("/upload/fyers-token", response_model=UploadResult)
+async def upload_fyers_token(
+    file: UploadFile = File(...),
+) -> UploadResult:
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Filename required")
+    content = await file.read()
+    try:
+        meta = import_fyers_token_bytes(content, file.filename)
+        if live_price_service.status.running:
+            fyers_stream_service.stop()
+            fyers_stream_service.start()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return UploadResult(
+        import_type="fyers_token",
+        filename=file.filename,
+        counts={"saved": 1, "token_ready": 1 if meta.get("token_ready") else 0},
+        refresh_task_id=None,
     )
 
 

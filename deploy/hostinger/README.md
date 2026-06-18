@@ -86,29 +86,15 @@ The script installs Python, Node, nginx, certbot, builds the frontend, starts th
 
 ---
 
-## 3. Fyers live prices (optional)
+## 3. Fyers live prices (VPS / cloud)
 
-Fyers OAuth uses a **local callback on port 5000** — run login once over SSH (not from the public website):
+1. On your **Windows PC**, run the dashboard locally and use **Login on this PC** (or `python backend/scripts/fyers_login.py`).
+2. Copy `backend/token.json` from your PC.
+3. On the live site: **Data → ① Fyers → upload token.json**.
 
-```bash
-# On your PC: forward port 5000 to the VPS
-ssh -L 5000:127.0.0.1:5000 root@YOUR_VPS_IP
+Ensure `credentials.txt` or `FYERS_CLIENT_ID` / `FYERS_SECRET_KEY` are set in server `.env` (token alone is not enough for API calls).
 
-# On the VPS (in another SSH session):
-scp credentials.txt root@YOUR_VPS_IP:/opt/vs-dashboard/backend/
-cd /opt/vs-dashboard/backend
-sudo -u www-data /opt/vs-dashboard/backend/.venv/bin/python scripts/fyers_login.py
-```
-
-Or copy `backend/token.json` from your local machine after logging in at home:
-
-```bash
-scp backend/token.json root@YOUR_VPS_IP:/opt/vs-dashboard/backend/
-sudo chown www-data:www-data /opt/vs-dashboard/backend/token.json
-sudo systemctl restart vs-dashboard-api
-```
-
-Ensure Fyers app **Redirect URI** is `http://127.0.0.1:5000/callback` (same as local dev).
+When the token expires, repeat step 1–3.
 
 ---
 

@@ -86,6 +86,30 @@ def save_token(resp: dict) -> None:
     logger.info("Fyers token saved to %s", path.name)
 
 
+def import_fyers_token_bytes(content: bytes, filename: str) -> dict[str, object]:
+    """Validate and save token.json from manual upload (same format as browser login)."""
+    name = (filename or "").lower()
+    if not name.endswith(".json"):
+        raise ValueError("Upload a .json file (token.json from Fyers login on your PC)")
+
+    try:
+        data = json.loads(content.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Invalid JSON — export token.json from VS Dashboard after Fyers login") from exc
+
+    if not isinstance(data, dict):
+        raise ValueError("token.json must be a JSON object")
+    if not data.get("access_token"):
+        raise ValueError("token.json missing access_token — log in to Fyers locally first")
+
+    save_token(data)
+    status = auth_status()
+    return {
+        "token_ready": status["token_ready"],
+        "expires_at": status.get("expires_at"),
+    }
+
+
 def load_token() -> dict | None:
     path = token_file_path()
     if not path.exists():
