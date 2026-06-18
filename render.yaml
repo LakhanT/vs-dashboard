@@ -19,6 +19,6 @@ services:
       - key: LIVE_PRICE_ENABLED
         value: "false"
       - key: CORS_ORIGINS
-        sync: false
+        value: https://vs-dashboard-zeta.vercel.app,https://vs-dashboard-lmsnda9pa-bjghgjh.vercel.app
       - key: PYTHON_VERSION
         value: "3.11.9"
