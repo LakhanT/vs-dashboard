@@ -1,14 +1,46 @@
 # Deploy VS Dashboard on Hostinger VPS
 
-Single server setup: **nginx** serves the React app and proxies `/api` + WebSockets to **FastAPI**.
+Use this when you have **other websites on the same server**. The isolated installer only **adds** a new nginx vhost + systemd service — it does **not** remove `default` or change existing sites.
 
-```
-Browser  →  https://YOUR_DOMAIN  →  nginx
-                                      ├─ /          → frontend/dist (static)
-                                      └─ /api/*     → uvicorn :8000
+---
+
+## Shared VPS (other sites already running) — use this
+
+```bash
+ssh lakhan@194.238.16.88
+
+git clone https://github.com/LakhanT/vs-dashboard.git ~/vs-dashboard
+cd ~/vs-dashboard
+chmod +x deploy/hostinger/*.sh
+
+# Use a SUBDOMAIN dedicated to this app (e.g. dashboard.yourdomain.com)
+bash deploy/hostinger/install-isolated.sh dashboard.yourdomain.com 8010
 ```
 
-No Vercel or Render needed. Fyers live prices work on your VPS (set redirect URI to your domain).
+Then SSL (only for your subdomain):
+
+```bash
+sudo certbot --nginx -d dashboard.yourdomain.com
+```
+
+Updates later:
+
+```bash
+bash ~/vs-dashboard/deploy/hostinger/deploy-isolated.sh
+```
+
+| What it touches | What it does NOT touch |
+|-----------------|-------------------------|
+| New file `/etc/nginx/sites-available/vs-dashboard` | Other `sites-enabled/*` entries |
+| New systemd unit `vs-dashboard-api` | Apache/other app services |
+| App files in `~/vs-dashboard` | `/var/www` or other project folders |
+| localhost port `8010` (configurable) | Port 80/443 shared safely via `server_name` |
+
+---
+
+## Fresh VPS (no other sites)
+
+See **install.sh** below for a full single-purpose server setup.
 
 ---
 
