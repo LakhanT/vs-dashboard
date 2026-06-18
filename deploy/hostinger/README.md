@@ -88,13 +88,19 @@ The script installs Python, Node, nginx, certbot, builds the frontend, starts th
 
 ## 3. Fyers live prices (VPS / cloud)
 
-1. On your **Windows PC**, run the dashboard locally and use **Login on this PC** (or `python backend/scripts/fyers_login.py`).
-2. Copy `backend/token.json` from your PC.
-3. On the live site: **Data → ① Fyers → upload token.json**.
+**Data panel uploads (same as RSI / Fusion):**
 
-Ensure `credentials.txt` or `FYERS_CLIENT_ID` / `FYERS_SECRET_KEY` are set in server `.env` (token alone is not enough for API calls).
+1. Upload **credentials.txt** → saves file + writes `FYERS_CLIENT_ID`, `FYERS_SECRET_KEY`, etc. to server `.env`
+2. On your PC: login Fyers → upload **token.json**
 
-When the token expires, repeat step 1–3.
+Or locally sync from Downloads:
+
+```bash
+cd backend
+python scripts/sync_fyers_env.py
+```
+
+Restart API after credentials upload: `systemctl restart vs-dashboard-api`
 
 ---
 

@@ -113,6 +113,15 @@ export function uploadFyersToken(file: File) {
   });
 }
 
+export function uploadFyersCredentials(file: File) {
+  const form = new FormData();
+  form.append("file", file);
+  return fetch(`${API_BASE}/upload/fyers-credentials`, { method: "POST", body: form }).then(async (r) => {
+    if (!r.ok) throw new Error(await r.text());
+    return r.json() as Promise<UploadResult>;
+  });
+}
+
 export function runPipeline(excelPath?: string) {
   return request<PipelineTask>("/pipeline/run", {
     method: "POST",

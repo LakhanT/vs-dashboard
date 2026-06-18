@@ -11,6 +11,7 @@ import {
   runLiveRefresh,
   syncFnoList,
   uploadFusionMatrix,
+  uploadFyersCredentials,
   uploadFyersToken,
   uploadRsiDigger,
 } from "./api";
@@ -339,6 +340,18 @@ export default function App() {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Fyers login failed");
+    }
+  }
+
+  async function handleFyersCredentialsUpload(file: File | null) {
+    if (!file) return;
+    setError(null);
+    try {
+      await uploadFyersCredentials(file);
+      setFyersLoginMsg("Fyers credentials saved to server .env");
+      await refreshMeta();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Credentials upload failed");
     }
   }
 
@@ -679,7 +692,18 @@ export default function App() {
                   </div>
                   <label className="mt-3 flex cursor-pointer flex-col rounded-lg border border-dashed border-slate-300 p-3 hover:border-sky-400">
                     <span className="mb-1 text-xs text-slate-500">
-                      Upload <strong>token.json</strong> (from Fyers login on your PC)
+                      Upload <strong>credentials.txt</strong> (App ID + Secret)
+                    </span>
+                    <input
+                      type="file"
+                      accept=".txt,text/plain"
+                      onChange={(e) => void handleFyersCredentialsUpload(e.target.files?.[0] ?? null)}
+                      className="text-xs text-sky-600"
+                    />
+                  </label>
+                  <label className="mt-2 flex cursor-pointer flex-col rounded-lg border border-dashed border-slate-300 p-3 hover:border-sky-400">
+                    <span className="mb-1 text-xs text-slate-500">
+                      Upload <strong>token.json</strong> (after Fyers login on PC)
                     </span>
                     <input
                       type="file"

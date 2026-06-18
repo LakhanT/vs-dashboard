@@ -47,17 +47,9 @@ def token_file_path() -> Path:
 
 def load_credentials_file(path: str | Path) -> dict[str, str]:
     """Parse credentials.txt — App ID and Secret ID (no secrets logged)."""
-    text = Path(path).read_text(encoding="utf-8")
-    patterns = {
-        "client_id": r"App\s*ID\s*:\s*(\S+)",
-        "secret_key": r"Secret\s*ID\s*:\s*(\S+)",
-    }
-    result: dict[str, str] = {}
-    for key, pattern in patterns.items():
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            result[key] = match.group(1).strip()
-    return result
+    from app.services.fyers_credentials import load_credentials_file as _load
+
+    return _load(path)
 
 
 def resolve_app_credentials() -> tuple[str, str, str]:
