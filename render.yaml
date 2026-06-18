@@ -1,0 +1,24 @@
+# Deploy backend API on Render (free web service).
+# Dashboard UI: deploy frontend/ folder on Vercel (see DEPLOY.md).
+
+services:
+  - type: web
+    name: vs-dashboard-api
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATABASE_URL
+        value: sqlite:///./vs_dashboard.db
+      - key: OHLC_DATA_SOURCE
+        value: yahoo
+      - key: LIVE_PRICE_SOURCE
+        value: yahoo
+      - key: LIVE_PRICE_ENABLED
+        value: "false"
+      - key: CORS_ORIGINS
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.11.9"

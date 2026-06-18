@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Secrets & local data
+.env
+.env.local
+*.db
+*.db-shm
+*.db-wal
+backend/token.json
+backend/.fyers_token
+credentials.txt
+**/credentials.txt
+
+# Node
+node_modules/
+frontend/dist/
+frontend/dist-ssr/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
+
+# Build / cache
+.pytest_cache/
+.mypy_cache/
+*.xlsx
+*.xls

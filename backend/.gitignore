@@ -1,0 +1,6 @@
+.env
+token.json
+.fyers_token
+*.db
+__pycache__/
+.venv/
