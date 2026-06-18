@@ -11,6 +11,7 @@ venv/
 *.db
 *.db-shm
 *.db-wal
+backend/data/
 backend/token.json
 backend/.fyers_token
 credentials.txt

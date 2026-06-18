@@ -1,4 +1,29 @@
-# Deploy VS Dashboard (GitHub + Vercel + Render)
+# Deploy VS Dashboard
+
+## Hostinger VPS (recommended)
+
+**Single server + your domain** — nginx, SSL, FastAPI, Fyers live prices.
+
+See **[deploy/hostinger/README.md](deploy/hostinger/README.md)** for full steps.
+
+Quick start on the VPS:
+
+```bash
+git clone https://github.com/LakhanT/vs-dashboard.git /opt/vs-dashboard
+cd /opt/vs-dashboard
+sudo bash deploy/hostinger/install.sh dashboard.yourdomain.com you@email.com
+```
+
+---
+
+## Vercel + Render (alternative)
+
+See [DEPLOY.md](DEPLOY.md) for cloud hosting (frontend on Vercel, backend on Render).
+
+---
+
+# Legacy: Vercel + Render details
+
 
 This app has two parts:
 
