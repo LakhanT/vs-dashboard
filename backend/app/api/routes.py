@@ -173,6 +173,7 @@ async def upload_rsi_digger(
     try:
         counts = import_rsi_digger_file(db, content, file.filename)
         invalidate_universe_cache()
+        live_price_service.refresh_universe()
         refresh_task_id = _schedule_universe_refresh(background_tasks, db, trigger="rsi_upload")
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(exc)) from exc

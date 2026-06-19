@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 import pandas as pd
 
@@ -82,6 +83,95 @@ def fetch_live_quotes(
     return quotes
 
 
+def _map_quotes_by_stock(
+    db,
+    stocks: list[Stock],
+    raw: dict[int, LiveQuote],
+    *,
+    source_label: str,
+) -> dict[int, LiveQuote]:
+    from sqlalchemy.orm import Session
+
+    from app.services.stock_resolver import quote_stock_candidates
+
+    if not isinstance(db, Session):
+        raise TypeError("db must be a SQLAlchemy Session")
+
+    candidates_by_stock: dict[int, list[Stock]] = {
+        stock.id: quote_stock_candidates(db, stock) for stock in stocks
+    }
+    mapped: dict[int, LiveQuote] = {}
+    for stock in stocks:
+        for candidate in candidates_by_stock[stock.id]:
+            quote = raw.get(candidate.id)
+            if quote and quote.ltp is not None and float(quote.ltp) > 0:
+                mapped[stock.id] = quote
+                break
+
+    missing = len(stocks) - len(mapped)
+    if missing:
+        logger.info(
+            "LTP mapped %s/%s stocks (%s missing via %s)",
+            len(mapped),
+            len(stocks),
+            missing,
+            source_label,
+        )
+    return mapped
+
+
+def fetch_fyers_quotes_for_stocks(db, stocks: list[Stock]) -> dict[int, LiveQuote]:
+    """
+    Fyers-only LTP for the live price service (no Yahoo/NSE fallback).
+    """
+    return fetch_fyers_quotes_for_stocks_parallel(db, stocks)
+
+
+def fetch_fyers_quotes_for_stocks_parallel(
+    db,
+    stocks: list[Stock],
+    *,
+    max_workers: int | None = None,
+    on_batch: Callable[[dict[int, LiveQuote]], None] | None = None,
+) -> dict[int, LiveQuote]:
+    """
+    Fyers-only LTP with parallel HTTP batches.
+    ``on_batch`` receives universe stock-id quotes as each parallel request completes.
+    """
+    from sqlalchemy.orm import Session
+
+    from app.services.stock_resolver import quote_stock_candidates
+
+    if not isinstance(db, Session):
+        raise TypeError("db must be a SQLAlchemy Session")
+    if not stocks:
+        return {}
+
+    candidates_by_stock: dict[int, list[Stock]] = {
+        stock.id: quote_stock_candidates(db, stock) for stock in stocks
+    }
+    unique_candidates: dict[int, Stock] = {}
+    for candidate_list in candidates_by_stock.values():
+        for candidate in candidate_list:
+            unique_candidates[candidate.id] = candidate
+
+    from app.services.fyers import fetch_live_quotes_parallel
+
+    def _on_candidate_batch(raw: dict[int, LiveQuote]) -> None:
+        if on_batch is None:
+            return
+        mapped = _map_quotes_by_stock(db, stocks, raw, source_label="fyers")
+        if mapped:
+            on_batch(mapped)
+
+    raw = fetch_live_quotes_parallel(
+        list(unique_candidates.values()),
+        max_workers=max_workers,
+        on_batch=_on_candidate_batch if on_batch else None,
+    )
+    return _map_quotes_by_stock(db, stocks, raw, source_label="fyers")
+
+
 def fetch_live_quotes_for_stocks(db, stocks: list[Stock]) -> dict[int, LiveQuote]:
     """
     Fetch LTP keyed by universe/dashboard stock id.
@@ -106,19 +196,7 @@ def fetch_live_quotes_for_stocks(db, stocks: list[Stock]) -> dict[int, LiveQuote
             unique_candidates[candidate.id] = candidate
 
     raw = fetch_live_quotes(list(unique_candidates.values()))
-
-    mapped: dict[int, LiveQuote] = {}
-    for stock in stocks:
-        for candidate in candidates_by_stock[stock.id]:
-            quote = raw.get(candidate.id)
-            if quote and quote.ltp is not None and float(quote.ltp) > 0:
-                mapped[stock.id] = quote
-                break
-
-    missing = len(stocks) - len(mapped)
-    if missing:
-        logger.info("LTP mapped %s/%s stocks (%s still missing after NSE/BSE/Yahoo)", len(mapped), len(stocks), missing)
-    return mapped
+    return _map_quotes_by_stock(db, stocks, raw, source_label="multi-source")
 
 
 def fetch_single_history(stock: Stock) -> pd.DataFrame | None:

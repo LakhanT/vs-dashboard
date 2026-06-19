@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { DashboardResponse, FilterField, LivePriceTick, MarketDataStatus, Stats } from "./types";
 import {
   fetchFilterFields,
@@ -165,10 +165,6 @@ export default function App() {
   const pageStart = (safePage - 1) * pageSize;
   const visibleRows = rows.slice(pageStart, pageStart + pageSize);
   const displayColumns = data?.columns?.length ? data.columns : ALL_TABLE_COLUMNS;
-  const visibleScrips = useMemo(
-    () => visibleRows.map((r) => String(r.scrip ?? "")).filter(Boolean),
-    [visibleRows],
-  );
 
   const applyPriceTicks = useCallback((ticks: LivePriceTick[]) => {
     const changed: string[] = [];
@@ -204,7 +200,6 @@ export default function App() {
   const { status: liveStatus, connected: liveConnected, refreshing: liveRefreshing } = useLivePrices(
     liveMode,
     applyPriceTicks,
-    visibleScrips,
   );
 
   const loadDashboard = useCallback(
@@ -424,7 +419,7 @@ export default function App() {
     { label: "Universe", value: universeCount || "—", hint: "RSI Digger stocks" },
     { label: "Matched", value: data?.matched_count ?? "—", hint: "After filters" },
     { label: "Fyers LTP", value: fyersReady ? "Ready" : "Login", hint: marketData?.live_price_source ?? "—" },
-    { label: "Live feed", value: liveConnected ? "On" : "Off", hint: liveMode ? `${liveStatus?.watch_count ?? 0} on screen` : "Paused" },
+    { label: "Live feed", value: liveConnected ? "On" : "Off", hint: liveMode ? `${liveStatus?.universe_count ?? 0} universe` : "Paused" },
     { label: "As of", value: data?.as_of ?? "—", hint: lastRefreshAt ? `Refreshed ${lastRefreshAt}` : "—" },
   ];
 
@@ -620,7 +615,7 @@ export default function App() {
                       ? "Poll mode"
                       : "Connecting…"}
               </span>
-              {liveStatus?.watch_count != null && <span>{liveStatus.watch_count} watched</span>}
+              {liveStatus?.universe_count != null && <span>{liveStatus.universe_count} universe</span>}
               {liveStatus?.last_quote_source && <span>via {liveStatus.last_quote_source}</span>}
               {lastTickAt && <span>Tick {lastTickAt}</span>}
             </>
@@ -997,6 +992,6 @@ export default function App() {
           {liveMode ? "Live" : "Off"}
         </button>
       </div>
-    </div>
+        </div>
   );
 }

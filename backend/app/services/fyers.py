@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from app.config import get_settings
 from app.models import Stock
@@ -20,7 +21,6 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 BATCH_SIZE = 50
-REQUEST_PAUSE_SEC = 0.25
 
 
 def get_access_token(*, force_refresh: bool = False) -> str | None:
@@ -59,6 +59,35 @@ def _resolve_stock_id(symbol_to_id: dict[str, int], fyers_symbol: str | None) ->
 
 
 def fetch_live_quotes(stocks: list[Stock]) -> dict[int, LiveQuote]:
+    return fetch_live_quotes_parallel(stocks)
+
+
+def _fetch_symbols_batch(
+    client_id: str,
+    access_token: str,
+    symbols: list[str],
+    symbol_to_id: dict[str, int],
+) -> dict[int, LiveQuote]:
+    if not symbols:
+        return {}
+    try:
+        from fyers_apiv3 import fyersModel
+
+        fyers = fyersModel.FyersModel(client_id=client_id, token=access_token, log_path="")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Fyers client init failed: %s", exc)
+        return {}
+    return _fetch_batch_fyers(fyers, symbols, symbol_to_id)
+
+
+def fetch_live_quotes_parallel(
+    stocks: list[Stock],
+    *,
+    batch_size: int | None = None,
+    max_workers: int | None = None,
+    on_batch: Callable[[dict[int, LiveQuote]], None] | None = None,
+) -> dict[int, LiveQuote]:
+    """Fetch Fyers quotes for all stocks concurrently (async-style parallel HTTP)."""
     if not stocks or not fyers_configured():
         return {}
 
@@ -74,30 +103,73 @@ def fetch_live_quotes(stocks: list[Stock]) -> dict[int, LiveQuote]:
         if symbol:
             _register_symbol(symbol_to_id, symbol, stock.id)
 
-    if not symbol_to_id:
+    all_symbols = list({s for s in symbol_to_id if ":" in s})
+    if not all_symbols:
         return {}
 
-    try:
-        from fyers_apiv3 import fyersModel
-
-        fyers = fyersModel.FyersModel(client_id=client_id, token=access_token, log_path="")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Fyers client init failed: %s", exc)
-        return {}
+    chunk = max(1, batch_size or settings.live_price_batch_size)
+    symbol_batches = [all_symbols[i : i + chunk] for i in range(0, len(all_symbols), chunk)]
+    workers = max(1, max_workers or settings.live_price_parallel_workers)
 
     quotes: dict[int, LiveQuote] = {}
-    symbols = list({s for s in symbol_to_id if ":" in s})
-
-    for start in range(0, len(symbols), BATCH_SIZE):
-        batch = symbols[start : start + BATCH_SIZE]
-        batch_quotes = _fetch_batch_fyers(fyers, batch, symbol_to_id)
-        quotes.update(batch_quotes)
-        time.sleep(REQUEST_PAUSE_SEC)
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="fyers-quotes") as executor:
+        futures = [
+            executor.submit(_fetch_symbols_batch, client_id, access_token, batch, symbol_to_id)
+            for batch in symbol_batches
+        ]
+        for future in as_completed(futures):
+            try:
+                batch_quotes = future.result()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Fyers parallel batch failed: %s", exc)
+                continue
+            if not batch_quotes:
+                continue
+            quotes.update(batch_quotes)
+            if on_batch:
+                try:
+                    on_batch(batch_quotes)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Fyers on_batch callback failed: %s", exc)
 
     if quotes:
-        logger.info("Fyers quotes: %s/%s symbols", len(quotes), len(stocks))
+        logger.info(
+            "Fyers parallel quotes: %s/%s symbols (%s batches, %s workers)",
+            len(quotes),
+            len(stocks),
+            len(symbol_batches),
+            workers,
+        )
     elif stocks:
         logger.debug("Fyers returned no quotes for %s symbols", len(stocks))
+    return quotes
+
+
+def fetch_live_quotes_sequential(stocks: list[Stock]) -> dict[int, LiveQuote]:
+    """Sequential fallback — one batch at a time."""
+    if not stocks or not fyers_configured():
+        return {}
+
+    access_token = ensure_access_token()
+    if not access_token:
+        return {}
+
+    client_id, _, _ = resolve_app_credentials()
+    symbol_to_id: dict[str, int] = {}
+    for stock in stocks:
+        symbol = to_fyers_symbol(stock)
+        if symbol:
+            _register_symbol(symbol_to_id, symbol, stock.id)
+
+    all_symbols = list({s for s in symbol_to_id if ":" in s})
+    if not all_symbols:
+        return {}
+
+    chunk = max(1, settings.live_price_batch_size)
+    quotes: dict[int, LiveQuote] = {}
+    for start in range(0, len(all_symbols), chunk):
+        batch = all_symbols[start : start + chunk]
+        quotes.update(_fetch_symbols_batch(client_id, access_token, batch, symbol_to_id))
     return quotes
 
 
