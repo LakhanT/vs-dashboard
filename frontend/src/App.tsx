@@ -28,6 +28,11 @@ import {
   type SheetFilterState,
 } from "./filterUtils";
 import { useLivePrices } from "./useLivePrices";
+import {
+  dashboardExportFilename,
+  downloadDashboardCsv,
+  downloadDashboardXlsx,
+} from "./exportDashboard";
 
 const PAGE_SIZES = [25, 50, 100];
 
@@ -138,6 +143,7 @@ export default function App() {
   const [flashKeys, setFlashKeys] = useState<Record<string, number>>({});
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
+  const [downloadOpen, setDownloadOpen] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("upload");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
@@ -413,6 +419,17 @@ export default function App() {
       }
       return next;
     });
+  };
+
+  const handleDownload = (format: "csv" | "xlsx") => {
+    if (!rows.length) return;
+    setDownloadOpen(false);
+    const filename = dashboardExportFilename(format, data?.as_of);
+    if (format === "csv") {
+      downloadDashboardCsv(displayColumns, rows, columnLabel, filename);
+    } else {
+      void downloadDashboardXlsx(displayColumns, rows, columnLabel, filename);
+    }
   };
 
   const kpiCards = [
@@ -808,6 +825,54 @@ export default function App() {
               <span className="font-medium text-slate-700">{rows.length}</span> rows · page {safePage}/{totalPages}
             </p>
             <div className="flex flex-wrap items-center gap-2 text-xs">
+              <div className="relative">
+                <button
+                  type="button"
+                  disabled={rows.length === 0}
+                  onClick={() => setDownloadOpen((v) => !v)}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-slate-50 px-2.5 py-1.5 font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
+                  title="Download filtered dashboard"
+                >
+                  <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden>
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5m0 0l5-5m-5 5V4"
+                    />
+                  </svg>
+                  Download
+                </button>
+                {downloadOpen && rows.length > 0 && (
+                  <>
+                    <button
+                      type="button"
+                      className="fixed inset-0 z-40"
+                      aria-label="Close download menu"
+                      onClick={() => setDownloadOpen(false)}
+                    />
+                    <div className="absolute right-0 z-50 mt-1 w-40 rounded-xl border border-slate-300 bg-white py-1 shadow-xl">
+                      <button
+                        type="button"
+                        onClick={() => handleDownload("xlsx")}
+                        className="block w-full px-4 py-2 text-left text-sm text-slate-700 hover:bg-slate-100"
+                      >
+                        Excel (.xlsx)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDownload("csv")}
+                        className="block w-full px-4 py-2 text-left text-sm text-slate-700 hover:bg-slate-100"
+                      >
+                        CSV (.csv)
+                      </button>
+                      <p className="border-t border-slate-200 px-4 py-2 text-[10px] text-slate-400">
+                        {rows.length} filtered rows
+                      </p>
+                    </div>
+                  </>
+                )}
+              </div>
               <span className="text-slate-500">Sort</span>
               <select
                 value={sortBy}
