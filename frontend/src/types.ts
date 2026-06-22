@@ -12,6 +12,11 @@ export type FilterField = {
   operators: string[];
 };
 
+export type SortLevel = {
+  field: string;
+  dir: "asc" | "desc";
+};
+
 export type DashboardQuery = {
   rules: FilterRule[];
   logic: "and" | "or";
@@ -19,6 +24,7 @@ export type DashboardQuery = {
   search?: string | null;
   sort_by?: string | null;
   sort_dir?: "asc" | "desc";
+  sorts?: SortLevel[];
   fresh?: boolean;
 };
 

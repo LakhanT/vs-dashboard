@@ -48,6 +48,11 @@ class DashboardFilterIn(BaseModel):
     search: str | None = None
 
 
+class SortSpec(BaseModel):
+    field: str
+    dir: str = Field(default="asc", pattern="^(asc|desc)$")
+
+
 class DashboardQueryIn(BaseModel):
     rules: list[FilterRule] = Field(default_factory=list)
     logic: str = Field(default="and", pattern="^(and|or)$")
@@ -55,6 +60,7 @@ class DashboardQueryIn(BaseModel):
     search: str | None = None
     sort_by: str | None = None
     sort_dir: str = Field(default="asc", pattern="^(asc|desc)$")
+    sorts: list[SortSpec] | None = None
     fresh: bool = True
 
 

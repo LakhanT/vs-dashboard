@@ -254,13 +254,7 @@ def _project_columns(rows: list[dict[str, Any]], columns: list[str] | None) -> l
     return [{col: row.get(col) for col in cols if col in row or True} for row in rows]
 
 
-def _sort_rows(rows: list[dict[str, Any]], sort_by: str | None, sort_dir: str) -> list[dict[str, Any]]:
-    if not rows:
-        return rows
-
-    key = sort_by if sort_by and sort_by in rows[0] else "y_rank"
-    reverse = sort_dir == "desc"
-
+def _sort_key_for_field(key: str):
     def sort_key(row: dict[str, Any]) -> tuple[int, Any]:
         value = row.get(key)
         if value is None:
@@ -269,10 +263,49 @@ def _sort_rows(rows: list[dict[str, Any]], sort_by: str | None, sort_dir: str) -
             return (0, value.lower())
         return (0, value)
 
-    # Stable tie-breaker on scrip.
-    if key != "scrip":
-        rows.sort(key=lambda r: (r.get("scrip") or ""))
-    rows.sort(key=sort_key, reverse=reverse)
+    return sort_key
+
+
+def _resolve_sort_specs(
+    rows: list[dict[str, Any]],
+    sort_by: str | None,
+    sort_dir: str,
+    sorts: list | None,
+) -> list[tuple[str, str]]:
+    if not rows:
+        return [("y_rank", "asc")]
+
+    valid_keys = set(rows[0].keys())
+    specs: list[tuple[str, str]] = []
+
+    if sorts:
+        for item in sorts:
+            field = getattr(item, "field", None) or (item.get("field") if isinstance(item, dict) else None)
+            direction = getattr(item, "dir", None) or (item.get("dir") if isinstance(item, dict) else None) or "asc"
+            if field and field in valid_keys:
+                specs.append((field, direction if direction in ("asc", "desc") else "asc"))
+    elif sort_by and sort_by in valid_keys:
+        specs.append((sort_by, sort_dir if sort_dir in ("asc", "desc") else "asc"))
+    else:
+        specs.append(("y_rank", "asc"))
+
+    if not any(field == "scrip" for field, _ in specs):
+        specs.append(("scrip", "asc"))
+    return specs
+
+
+def _sort_rows(
+    rows: list[dict[str, Any]],
+    sort_by: str | None,
+    sort_dir: str,
+    sorts: list | None = None,
+) -> list[dict[str, Any]]:
+    if not rows:
+        return rows
+
+    specs = _resolve_sort_specs(rows, sort_by, sort_dir, sorts)
+    for field, direction in reversed(specs):
+        rows.sort(key=_sort_key_for_field(field), reverse=direction == "desc")
     return rows
 
 
@@ -283,7 +316,7 @@ def query_dashboard(db: Session, query: DashboardQueryIn) -> DashboardResponse:
     rules = query.rules
     filtered = [row for row in universe if row_matches_rules(row, rules, query.logic)]
     filtered = _apply_search(filtered, query.search)
-    _sort_rows(filtered, query.sort_by, query.sort_dir)
+    _sort_rows(filtered, query.sort_by, query.sort_dir, query.sorts)
     columns = query.columns or DEFAULT_COLUMNS
     return DashboardResponse(
         as_of=as_of,

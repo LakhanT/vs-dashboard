@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { DashboardResponse, FilterField, LivePriceTick, MarketDataStatus, Stats } from "./types";
+import type { DashboardResponse, FilterField, LivePriceTick, MarketDataStatus, SortLevel, Stats } from "./types";
 import {
   fetchFilterFields,
   fetchMarketDataStatus,
@@ -35,6 +35,7 @@ import {
 } from "./exportDashboard";
 
 const PAGE_SIZES = [25, 50, 100];
+const MAX_SORT_LEVELS = 5;
 
 const COLUMN_LABELS: Record<string, string> = {
   scrip: "Scrip",
@@ -147,8 +148,7 @@ export default function App() {
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("upload");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
-  const [sortBy, setSortBy] = useState("y_rank");
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const [sorts, setSorts] = useState<SortLevel[]>([{ field: "y_rank", dir: "asc" }]);
   const [highlightFno, setHighlightFno] = useState(() => {
     try {
       return localStorage.getItem("vs-highlight-fno") !== "false";
@@ -171,6 +171,7 @@ export default function App() {
   const pageStart = (safePage - 1) * pageSize;
   const visibleRows = rows.slice(pageStart, pageStart + pageSize);
   const displayColumns = data?.columns?.length ? data.columns : ALL_TABLE_COLUMNS;
+  const primarySort = sorts[0] ?? { field: "y_rank", dir: "asc" as const };
 
   const applyPriceTicks = useCallback((ticks: LivePriceTick[]) => {
     const changed: string[] = [];
@@ -218,8 +219,9 @@ export default function App() {
           logic: "and",
           columns: ALL_TABLE_COLUMNS,
           search: searchRef.current || null,
-          sort_by: sortBy,
-          sort_dir: sortDir,
+          sorts,
+          sort_by: sorts[0]?.field,
+          sort_dir: sorts[0]?.dir,
           fresh: !opts?.silent,
         });
         setData(dashboard);
@@ -232,7 +234,7 @@ export default function App() {
         if (!opts?.silent) setLoading(false);
       }
     },
-    [sortBy, sortDir],
+    [sorts],
   );
 
   const refreshMeta = useCallback(async () => {
@@ -268,11 +270,11 @@ export default function App() {
       return;
     }
     void loadDashboard();
-  }, [sortBy, sortDir, loadDashboard]);
+  }, [sorts, loadDashboard]);
 
   useEffect(() => {
     setPage(1);
-  }, [search, data?.matched_count, pageSize, sortBy, sortDir, sheetFilters]);
+  }, [search, data?.matched_count, pageSize, sorts, sheetFilters]);
 
   useEffect(() => {
     if (!sidebarOpen && !toolsOpen) return;
@@ -431,6 +433,34 @@ export default function App() {
       void downloadDashboardXlsx(displayColumns, rows, columnLabel, filename);
     }
   };
+
+  const handleColumnSort = useCallback((col: string, multi: boolean) => {
+    setSorts((prev) => {
+      const idx = prev.findIndex((s) => s.field === col);
+      if (multi) {
+        if (idx >= 0) {
+          const next = [...prev];
+          next[idx] = { field: col, dir: prev[idx].dir === "asc" ? "desc" : "asc" };
+          return next;
+        }
+        if (prev.length >= MAX_SORT_LEVELS) return prev;
+        return [...prev, { field: col, dir: "asc" }];
+      }
+      if (idx === 0 && prev.length === 1) {
+        return [{ field: col, dir: prev[0].dir === "asc" ? "desc" : "asc" }];
+      }
+      return [{ field: col, dir: "asc" }];
+    });
+  }, []);
+
+  const clearExtraSorts = useCallback(() => {
+    setSorts((prev) => (prev.length ? [prev[0]] : [{ field: "y_rank", dir: "asc" }]));
+  }, []);
+
+  const sortStackHint =
+    sorts.length > 1
+      ? sorts.map((s, i) => `${i + 1}. ${columnLabel(s.field)} ${s.dir === "asc" ? "↑" : "↓"}`).join(" → ")
+      : null;
 
   const kpiCards = [
     { label: "Universe", value: universeCount || "—", hint: "RSI Digger stocks" },
@@ -823,6 +853,11 @@ export default function App() {
           <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-3 py-2 sm:px-4">
             <p className="text-xs text-slate-400">
               <span className="font-medium text-slate-700">{rows.length}</span> rows · page {safePage}/{totalPages}
+              {sortStackHint && (
+                <span className="ml-2 hidden text-sky-700 sm:inline" title="Shift+click headers to add sort levels">
+                  Sort: {sortStackHint}
+                </span>
+              )}
             </p>
             <div className="flex flex-wrap items-center gap-2 text-xs">
               <div className="relative">
@@ -873,27 +908,49 @@ export default function App() {
                   </>
                 )}
               </div>
-              <span className="text-slate-500">Sort</span>
+              <span className="text-slate-500" title="Shift+click column headers to add secondary sorts">
+                Sort
+              </span>
               <select
-                value={sortBy}
-                onChange={(e) => setSortBy(e.target.value)}
+                value={primarySort.field}
+                onChange={(e) =>
+                  setSorts((prev) => {
+                    const dir = prev[0]?.dir ?? "asc";
+                    const rest = prev.slice(1).filter((s) => s.field !== e.target.value);
+                    return [{ field: e.target.value, dir }, ...rest];
+                  })
+                }
                 className="rounded-lg border border-slate-300 bg-slate-50 px-2 py-1.5 text-slate-700"
               >
-                <option value="y_rank">Y Rank</option>
-                <option value="q_rank">Q Rank</option>
-                <option value="m_rank">M Rank</option>
-                <option value="pct_change_today">% Today</option>
-                <option value="ltp">LTP</option>
-                <option value="rsi_avg">RSI Avg</option>
-                <option value="scrip">Scrip</option>
+                {displayColumns.map((col) => (
+                  <option key={col} value={col}>
+                    {columnLabel(col)}
+                  </option>
+                ))}
               </select>
               <button
                 type="button"
-                onClick={() => setSortDir((d) => (d === "asc" ? "desc" : "asc"))}
+                onClick={() =>
+                  setSorts((prev) =>
+                    prev.length
+                      ? [{ ...prev[0], dir: prev[0].dir === "asc" ? "desc" : "asc" }, ...prev.slice(1)]
+                      : [{ field: "y_rank", dir: "asc" }],
+                  )
+                }
                 className="rounded-lg border border-slate-300 px-2 py-1.5 text-slate-600"
               >
-                {sortDir === "asc" ? "↑ Asc" : "↓ Desc"}
+                {primarySort.dir === "asc" ? "↑ Asc" : "↓ Desc"}
               </button>
+              {sorts.length > 1 && (
+                <button
+                  type="button"
+                  onClick={clearExtraSorts}
+                  className="rounded-lg border border-slate-300 px-2 py-1.5 text-slate-500 hover:bg-slate-100"
+                  title={sortStackHint ?? undefined}
+                >
+                  Clear {sorts.length - 1} extra
+                </button>
+              )}
             </div>
           </div>
 
@@ -909,11 +966,40 @@ export default function App() {
             <table className="table-sticky-first w-full min-w-[2400px] text-left text-sm">
               <thead className="sticky top-0 z-10 bg-white text-[11px] uppercase tracking-wide text-slate-500">
                 <tr>
-                  {displayColumns.map((col) => (
-                    <th key={col} className="whitespace-nowrap px-3 py-2.5 font-semibold sm:px-4">
-                      {columnLabel(col)}
-                    </th>
-                  ))}
+                  {displayColumns.map((col) => {
+                    const sortIdx = sorts.findIndex((s) => s.field === col);
+                    const inSort = sortIdx >= 0;
+                    const level = sortIdx + 1;
+                    const dir = sorts[sortIdx]?.dir;
+                    return (
+                      <th key={col} className="whitespace-nowrap px-3 py-2.5 font-semibold sm:px-4">
+                        <button
+                          type="button"
+                          onClick={(e) => handleColumnSort(col, e.shiftKey)}
+                          title={
+                            inSort
+                              ? `Sort level ${level} (${dir}). Shift+click to add/toggle in multi-sort.`
+                              : `Sort by ${columnLabel(col)}. Shift+click to add as next sort level.`
+                          }
+                          className={`inline-flex items-center gap-1 rounded px-1 py-0.5 transition-colors hover:bg-slate-100 hover:text-slate-800 ${
+                            inSort ? "text-sky-700" : "text-slate-500"
+                          }`}
+                        >
+                          <span>{columnLabel(col)}</span>
+                          <span className="inline-flex min-w-[1.25rem] items-center justify-center text-[10px] tabular-nums" aria-hidden>
+                            {inSort ? (
+                              <>
+                                {sorts.length > 1 && <span className="mr-0.5 font-bold">{level}</span>}
+                                {dir === "asc" ? "▲" : "▼"}
+                              </>
+                            ) : (
+                              "⇅"
+                            )}
+                          </span>
+                        </button>
+                      </th>
+                    );
+                  })}
                 </tr>
               </thead>
               <tbody>
