@@ -12,7 +12,7 @@ from sqlalchemy import select
 from app.database import SessionLocal
 from app.models import Stock
 from app.services.fyers import fyers_configured
-from app.services.fyers_auth import ensure_access_token, resolve_app_credentials
+from app.services.fyers_auth import ensure_access_token, fyers_authorization_header, resolve_app_credentials
 from app.services.stock_resolver import quote_stock_candidates
 from app.services.symbol_utils import to_fyers_symbol
 
@@ -128,7 +128,7 @@ class FyersStreamService:
       return
 
     client_id, _, _ = resolve_app_credentials()
-    token = f"{client_id}:{access_token}"
+    token = fyers_authorization_header(client_id, access_token)
 
     try:
       from fyers_apiv3.FyersWebsocket import data_ws

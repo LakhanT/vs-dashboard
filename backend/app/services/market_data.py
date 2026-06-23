@@ -140,20 +140,15 @@ def fetch_fyers_quotes_for_stocks_parallel(
     """
     from sqlalchemy.orm import Session
 
-    from app.services.stock_resolver import quote_stock_candidates
+    from app.services.stock_resolver import resolve_live_stock
 
     if not isinstance(db, Session):
         raise TypeError("db must be a SQLAlchemy Session")
     if not stocks:
         return {}
 
-    candidates_by_stock: dict[int, list[Stock]] = {
-        stock.id: quote_stock_candidates(db, stock) for stock in stocks
-    }
-    unique_candidates: dict[int, Stock] = {}
-    for candidate_list in candidates_by_stock.values():
-        for candidate in candidate_list:
-            unique_candidates[candidate.id] = candidate
+    # One Fyers symbol per universe row (avoids NSE+BSE duplicate batches & bad symbols).
+    quote_targets = [resolve_live_stock(db, stock) for stock in stocks]
 
     from app.services.fyers import fetch_live_quotes_parallel
 
@@ -165,7 +160,7 @@ def fetch_fyers_quotes_for_stocks_parallel(
             on_batch(mapped)
 
     raw = fetch_live_quotes_parallel(
-        list(unique_candidates.values()),
+        quote_targets,
         max_workers=max_workers,
         on_batch=_on_candidate_batch if on_batch else None,
     )

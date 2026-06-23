@@ -117,6 +117,33 @@ export type LivePriceTick = {
   at?: string;
 };
 
+export type LiveRankSnapshotRow = {
+  scrip: string;
+  y_rank: number | null;
+  q_rank: number | null;
+  m_rank: number | null;
+  y_open: number | null;
+  y_high: number | null;
+  y_low: number | null;
+  y_close: number | null;
+  q_open: number | null;
+  q_high: number | null;
+  q_low: number | null;
+  q_close: number | null;
+  m_open: number | null;
+  m_high: number | null;
+  m_low: number | null;
+  m_close: number | null;
+  y_pct_change_open: number | null;
+  q_pct_change_open: number | null;
+  m_pct_change_open: number | null;
+  y_high_retracement: number | null;
+  green_range: number | null;
+  retracement_from_high: number | null;
+  rise_from_low: number | null;
+  bullish_bo: number | null;
+};
+
 export type LivePriceRefreshResponse = {
   type: string;
   updated: number;

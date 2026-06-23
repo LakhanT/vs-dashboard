@@ -281,5 +281,9 @@ def _normalize_history_frame(frame: pd.DataFrame) -> pd.DataFrame | None:
     if data.empty:
         return None
 
-    data.index = pd.to_datetime(data.index).tz_localize(None)
+    from app.services.market_calendar import normalize_daily_bars_to_ist
+
+    data = normalize_daily_bars_to_ist(data)
+    if data.empty:
+        return None
     return data.sort_index()

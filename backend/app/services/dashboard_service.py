@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.models import (
     FusionSnapshot,
+    OhlcBar,
     RankingSnapshot,
     RetracementSnapshot,
     RsiSnapshot,
@@ -48,6 +49,44 @@ def _ranking_maps(db: Session, timeframe: Timeframe) -> dict[int, RankingSnapsho
     return {r.stock_id: r for r in rows}
 
 
+def _current_ohlc_maps(db: Session, stock_ids: list[int]) -> dict[int, dict[Timeframe, OhlcBar]]:
+    if not stock_ids:
+        return {}
+    rows = db.scalars(
+        select(OhlcBar).where(
+            OhlcBar.stock_id.in_(stock_ids),
+            OhlcBar.is_current.is_(True),
+            OhlcBar.timeframe.in_((Timeframe.YEARLY, Timeframe.QUARTERLY, Timeframe.MONTHLY)),
+        )
+    ).all()
+    result: dict[int, dict[Timeframe, OhlcBar]] = {}
+    for bar in rows:
+        result.setdefault(bar.stock_id, {})[bar.timeframe] = bar
+    return result
+
+
+def _period_ohlc_fields(
+    ohlc_by_stock: dict[int, dict[Timeframe, OhlcBar]],
+    stock_id: int,
+    timeframe: Timeframe,
+    prefix: str,
+) -> dict[str, float | None]:
+    bar = ohlc_by_stock.get(stock_id, {}).get(timeframe)
+    if not bar:
+        return {
+            f"{prefix}_open": None,
+            f"{prefix}_high": None,
+            f"{prefix}_low": None,
+            f"{prefix}_close": None,
+        }
+    return {
+        f"{prefix}_open": bar.open,
+        f"{prefix}_high": bar.high,
+        f"{prefix}_low": bar.low,
+        f"{prefix}_close": bar.close if bar.close is not None else bar.lcp,
+    }
+
+
 def _latest_map_for_model(db: Session, model: Any) -> dict[int, Any]:
     latest_date = db.scalar(select(func.max(model.as_of)))
     if latest_date is None:
@@ -82,20 +121,26 @@ def invalidate_universe_cache() -> None:
 def _overlay_live_prices(rows: list[dict[str, Any]]) -> None:
     try:
         from app.services.live_price_service import live_price_service
+        from app.services.live_ranking import live_ranking_cache
 
         overlay = live_price_service.get_scrip_ltps()
+        rank_overlay = live_ranking_cache.get_overlay_by_scrip() if live_ranking_cache.loaded() else {}
     except Exception:  # noqa: BLE001
         return
-    if not overlay:
+    if not overlay and not rank_overlay:
         return
     for row in rows:
         key = str(row.get("scrip", "")).upper()
         tick = overlay.get(key)
-        if not tick:
-            continue
-        row["ltp"] = tick.get("ltp", row.get("ltp"))
-        if tick.get("pct_change") is not None:
-            row["pct_change_today"] = tick["pct_change"]
+        if tick:
+            row["ltp"] = tick.get("ltp", row.get("ltp"))
+            if tick.get("pct_change") is not None:
+                row["pct_change_today"] = tick["pct_change"]
+        ranks = rank_overlay.get(key)
+        if ranks:
+            for field, value in ranks.items():
+                if value is not None:
+                    row[field] = value
 
 
 def _rsi_map_for_universe(db: Session) -> dict[int, Any]:
@@ -131,6 +176,7 @@ def build_universe_rows(db: Session) -> tuple[date | None, list[dict[str, Any]]]
 
     # Universe is defined by RSI Digger (latest RSI snapshot date).
     rsi_universe_ids = get_rsi_universe_ids(db)
+    ohlc_by_stock = _current_ohlc_maps(db, list(rsi_universe_ids))
 
     stock_stmt = select(Stock).order_by(Stock.scrip)
     if rsi_universe_ids:
@@ -151,6 +197,16 @@ def build_universe_rows(db: Session) -> tuple[date | None, list[dict[str, Any]]]
         if (ltp is None or float(ltp) <= 0) and retr and retr.ltp:
             ltp = retr.ltp
 
+        y_ohlc = _period_ohlc_fields(ohlc_by_stock, stock.id, Timeframe.YEARLY, "y")
+        q_ohlc = _period_ohlc_fields(ohlc_by_stock, stock.id, Timeframe.QUARTERLY, "q")
+        m_ohlc = _period_ohlc_fields(ohlc_by_stock, stock.id, Timeframe.MONTHLY, "m")
+        if y and y_ohlc["y_open"] is None:
+            y_ohlc["y_open"] = y.period_open
+        if q and q_ohlc["q_open"] is None:
+            q_ohlc["q_open"] = q.period_open
+        if m and m_ohlc["m_open"] is None:
+            m_ohlc["m_open"] = m.period_open
+
         rows.append(
             {
                 "scrip": stock.scrip,
@@ -166,6 +222,9 @@ def build_universe_rows(db: Session) -> tuple[date | None, list[dict[str, Any]]]
                 "y_rank": y.live_ranking if y else None,
                 "q_rank": q.live_ranking if q else None,
                 "m_rank": m.live_ranking if m else None,
+                **y_ohlc,
+                **q_ohlc,
+                **m_ohlc,
                 "y_pct_change_open": y.pct_change_open if y else None,
                 "q_pct_change_open": q.pct_change_open if q else None,
                 "m_pct_change_open": m.pct_change_open if m else None,

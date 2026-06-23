@@ -43,6 +43,9 @@ FILTER_FIELDS: list[FilterFieldDef] = [
     FilterFieldDef("y_pct_change_open", "Y % From Open", FieldType.PERCENT, "Rankings", ["lt", "lte", "gt", "gte", "eq"]),
     FilterFieldDef("q_pct_change_open", "Q % From Open", FieldType.PERCENT, "Rankings", ["lt", "lte", "gt", "gte", "eq"]),
     FilterFieldDef("m_pct_change_open", "M % From Open", FieldType.PERCENT, "Rankings", ["lt", "lte", "gt", "gte", "eq"]),
+    FilterFieldDef("y_open", "Y Open", FieldType.NUMBER, "Rankings", ["lt", "lte", "gt", "gte", "eq"]),
+    FilterFieldDef("q_open", "Q Open", FieldType.NUMBER, "Rankings", ["lt", "lte", "gt", "gte", "eq"]),
+    FilterFieldDef("m_open", "M Open", FieldType.NUMBER, "Rankings", ["lt", "lte", "gt", "gte", "eq"]),
     FilterFieldDef("y_high_retracement", "Y High Retracement", FieldType.PERCENT, "Rankings", ["lt", "lte", "gt", "gte", "eq"]),
     # RSI
     FilterFieldDef("rsi", "RSI", FieldType.NUMBER, "RSI", ["lt", "lte", "gt", "gte", "eq"]),

@@ -5,6 +5,7 @@ from datetime import date, datetime
 
 import pandas as pd
 from sqlalchemy import select
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 import logging
@@ -21,8 +22,10 @@ from app.models import (
     Timeframe,
 )
 from app.services.market_data import fetch_daily_history, fetch_live_quotes_for_stocks
+from app.services.market_calendar import market_today
 from app.services.fno_sync import sync_fno_flags
-from app.services.ohlc_builder import CandleMetrics, build_period_metrics
+from app.services.ohlc_builder import CandleMetrics, build_period_metrics, effective_high_low
+from app.services.rank_utils import excel_rank_eq_desc
 from app.services.universe import get_rsi_universe_stocks
 
 
@@ -132,15 +135,15 @@ def _upsert_ohlc(db: Session, stock_id: int, metrics: CandleMetrics) -> None:
 
 
 def _assign_live_ranks(candidates: list[RankCandidate]) -> dict[tuple[int, Timeframe], int]:
-    grouped: dict[Timeframe, list[RankCandidate]] = {}
+    grouped: dict[Timeframe, dict[int, float]] = {}
     for candidate in candidates:
-        grouped.setdefault(candidate.timeframe, []).append(candidate)
+        grouped.setdefault(candidate.timeframe, {})[candidate.stock_id] = candidate.pct_change_open
 
     ranks: dict[tuple[int, Timeframe], int] = {}
-    for timeframe, items in grouped.items():
-        ordered = sorted(items, key=lambda item: item.pct_change_open, reverse=True)
-        for index, item in enumerate(ordered, start=1):
-            ranks[(item.stock_id, timeframe)] = index
+    for timeframe, values in grouped.items():
+        ranked = excel_rank_eq_desc(values)
+        for stock_id, rank in ranked.items():
+            ranks[(stock_id, timeframe)] = rank
     return ranks
 
 
@@ -178,6 +181,16 @@ def patch_live_ltps_only(db: Session, ltp_by_stock: dict[int, float]) -> None:
             ).all()
             for bar in bars:
                 bar.lcp = ltp
+                eff_high, eff_low = effective_high_low(
+                    open_price=bar.open,
+                    high=bar.high,
+                    low=bar.low,
+                    lcp=ltp,
+                )
+                if eff_high is not None:
+                    bar.high = eff_high
+                if eff_low is not None:
+                    bar.low = eff_low
         db.flush()
 
 
@@ -191,7 +204,7 @@ def patch_live_ltps_and_recalc(db: Session, ltp_by_stock: dict[int, float]) -> i
 
 
 def refresh_live_data(db: Session, *, stock_limit: int | None = None, sync_fno: bool = True) -> dict[str, int]:
-    as_of = date.today()
+    as_of = market_today()
     counts = {
         "fno_synced": 0,
         "stocks_processed": 0,
@@ -285,13 +298,22 @@ def refresh_live_data(db: Session, *, stock_limit: int | None = None, sync_fno: 
             )
         )
         retr = existing_retr or RetracementSnapshot(stock_id=stock_id, as_of=as_of)
-        retr.pre_high = yearly_current.high
+        pre_bar = next(
+            (m for m in period_metrics if m.timeframe == Timeframe.YEARLY and not m.is_current),
+            None,
+        )
+        pre_high = pre_bar.high if pre_bar else None
+        retr.pre_high = pre_high
         retr.ltp = yearly_current.lcp
         retr.pct_today = yearly_current.pct_change_today
         retr.green_range = yearly_current.green_range
         retr.retracement_from_high = yearly_current.retracement_from_high
         retr.rise_from_low = yearly_current.rise_from_low
-        retr.bullish_bo = yearly_current.pct_change_open
+        retr.bullish_bo = (
+            (yearly_current.lcp - pre_high) / pre_high
+            if pre_high and yearly_current.lcp is not None
+            else None
+        )
         retr.rsi_diff = rsi_payload.get("rsi_diff")
         retr.crossover = rsi_payload.get("crossover")
 
@@ -311,12 +333,22 @@ def refresh_live_data(db: Session, *, stock_limit: int | None = None, sync_fno: 
     recalc_counts = recalculate_rankings_from_db(db)
     counts["rankings"] = recalc_counts["rankings"]
     db.commit()
+    _reload_live_ranking_cache(db)
     return counts
+
+
+def _reload_live_ranking_cache(db: Session) -> None:
+    try:
+        from app.services.live_ranking import reload_live_ranking_cache
+
+        reload_live_ranking_cache(db)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Live ranking cache reload failed: %s", exc)
 
 
 def recalculate_rankings_from_db(db: Session) -> dict[str, int]:
     """Recompute Y/Q/M live rankings from stored current-period OHLC (universe only)."""
-    as_of = date.today()
+    as_of = market_today()
     counts = {"rankings": 0, "retracements": 0}
 
     stocks = get_rsi_universe_stocks(db)
@@ -326,6 +358,12 @@ def recalculate_rankings_from_db(db: Session) -> dict[str, int]:
     universe_ids = {s.id for s in stocks}
     rank_candidates: list[RankCandidate] = []
 
+    latest_prices: dict[int, float | None] = {}
+    latest_as_of = db.scalar(select(func.max(StockPrice.as_of)))
+    if latest_as_of:
+        for row in db.scalars(select(StockPrice).where(StockPrice.as_of == latest_as_of)):
+            latest_prices[row.stock_id] = row.pct_change
+
     for stock in stocks:
         current_bars = db.scalars(
             select(OhlcBar).where(OhlcBar.stock_id == stock.id, OhlcBar.is_current.is_(True))
@@ -333,6 +371,12 @@ def recalculate_rankings_from_db(db: Session) -> dict[str, int]:
         for bar in current_bars:
             if bar.open is None or bar.lcp is None:
                 continue
+            eff_high, eff_low = effective_high_low(
+                open_price=bar.open,
+                high=bar.high,
+                low=bar.low,
+                lcp=bar.lcp,
+            )
             pct_change_open = (bar.lcp - bar.open) / bar.open
             metrics = CandleMetrics(
                 timeframe=bar.timeframe,
@@ -340,16 +384,16 @@ def recalculate_rankings_from_db(db: Session) -> dict[str, int]:
                 is_current=True,
                 period_start=bar.period_start,
                 open=bar.open,
-                high=bar.high,
-                low=bar.low,
+                high=eff_high,
+                low=eff_low,
                 close=bar.close,
                 lcp=bar.lcp,
                 pct_change_open=pct_change_open,
                 pct_change_today=None,
-                high_retracement=(bar.lcp - bar.high) / bar.high if bar.high else None,
+                high_retracement=(bar.lcp - eff_high) / eff_high if eff_high else None,
                 green_range=pct_change_open,
-                retracement_from_high=(bar.lcp - bar.high) / bar.high if bar.high else None,
-                rise_from_low=(bar.lcp - bar.low) / bar.low if bar.low else None,
+                retracement_from_high=(bar.lcp - eff_high) / eff_high if eff_high else None,
+                rise_from_low=(bar.lcp - eff_low) / eff_low if eff_low else None,
             )
             rank_candidates.append(
                 RankCandidate(
@@ -383,6 +427,8 @@ def recalculate_rankings_from_db(db: Session) -> dict[str, int]:
         snapshot.period_open = metrics.open
         snapshot.pct_change_open = metrics.pct_change_open
         snapshot.high_retracement = metrics.high_retracement
+        if candidate.timeframe == Timeframe.YEARLY:
+            snapshot.pct_change_today = latest_prices.get(candidate.stock_id)
 
         if existing is None:
             db.add(snapshot)
@@ -413,4 +459,5 @@ def recalculate_rankings_from_db(db: Session) -> dict[str, int]:
             snapshot.m_rank = m_rank
 
     db.commit()
+    _reload_live_ranking_cache(db)
     return counts

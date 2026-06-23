@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { LivePriceStatus, LivePriceTick } from "./types";
+import type { LivePriceStatus, LivePriceTick, LiveRankSnapshotRow } from "./types";
 import {
   fetchLivePriceStatus,
   livePricesWebSocketUrl,
@@ -8,14 +8,21 @@ import {
 } from "./api";
 
 type PriceTickHandler = (ticks: LivePriceTick[]) => void;
+type RankSnapshotHandler = (rows: LiveRankSnapshotRow[], revision: number) => void;
 
-export function useLivePrices(enabled: boolean, onTick: PriceTickHandler) {
+export function useLivePrices(
+  enabled: boolean,
+  onTick: PriceTickHandler,
+  onRankSnapshot?: RankSnapshotHandler,
+) {
   const [status, setStatus] = useState<LivePriceStatus | null>(null);
   const [connected, setConnected] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const onTickRef = useRef(onTick);
+  const onRankSnapshotRef = useRef(onRankSnapshot);
   const wsRef = useRef<WebSocket | null>(null);
   onTickRef.current = onTick;
+  onRankSnapshotRef.current = onRankSnapshot;
 
   const refreshStatus = useCallback(async () => {
     const next = await fetchLivePriceStatus();
@@ -62,6 +69,8 @@ export function useLivePrices(enabled: boolean, onTick: PriceTickHandler) {
             type?: string;
             status?: LivePriceStatus;
             prices?: LivePriceTick[];
+            ranks?: LiveRankSnapshotRow[];
+            revision?: number;
           };
           if (payload.type === "connected" && payload.status) {
             setStatus(payload.status);
@@ -75,6 +84,9 @@ export function useLivePrices(enabled: boolean, onTick: PriceTickHandler) {
           if (payload.type === "price_tick" && payload.prices?.length) {
             markRefreshing();
             onTickRef.current(payload.prices);
+          }
+          if (payload.type === "rank_snapshot" && payload.ranks?.length && onRankSnapshotRef.current) {
+            onRankSnapshotRef.current(payload.ranks, payload.revision ?? 0);
           }
         } catch {
           // ignore malformed messages

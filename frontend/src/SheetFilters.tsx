@@ -65,7 +65,7 @@ function FieldRow({
     );
   }
 
-  const hint = field.type === "percent" ? " (use % or decimal)" : "";
+  const hint = field.type === "percent" ? " (enter % as shown in table)" : "";
   return (
     <div className="py-1.5">
       <span className="mb-1 block text-xs text-slate-600">

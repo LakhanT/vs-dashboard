@@ -1,9 +1,14 @@
+import { isPercentRatioColumn, ratioToDisplayPercent } from "./percentUtils";
+
 export type DashboardRow = Record<string, string | number | boolean | null | undefined>;
 
-function exportCellValue(value: unknown): string | number | boolean {
+function exportCellValue(col: string, value: unknown): string | number | boolean {
   if (value === null || value === undefined || value === "") return "";
   if (typeof value === "boolean") return value ? "Yes" : "No";
-  if (typeof value === "number") return value;
+  if (typeof value === "number") {
+    if (isPercentRatioColumn(col)) return ratioToDisplayPercent(value);
+    return value;
+  }
   return String(value);
 }
 
@@ -34,7 +39,7 @@ export function downloadDashboardCsv(
   const lines = [
     headers.map(escapeCsvCell).join(","),
     ...rows.map((row) =>
-      columns.map((col) => escapeCsvCell(exportCellValue(row[col]))).join(","),
+      columns.map((col) => escapeCsvCell(exportCellValue(col, row[col]))).join(","),
     ),
   ];
 
@@ -63,7 +68,7 @@ export async function downloadDashboardXlsx(
   const sheetRows = rows.map((row) => {
     const out: Record<string, string | number | boolean> = {};
     for (const col of columns) {
-      out[labelFor(col)] = exportCellValue(row[col]);
+      out[labelFor(col)] = exportCellValue(col, row[col]);
     }
     return out;
   });

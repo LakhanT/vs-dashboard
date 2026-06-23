@@ -65,7 +65,53 @@ def resolve_app_credentials() -> tuple[str, str, str]:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not read Fyers credentials file: %s", exc)
 
-    return client_id, secret_key, redirect_uri
+    return normalize_client_id(client_id), secret_key, redirect_uri
+
+
+def normalize_client_id(client_id: str) -> str:
+    """Fyers app id must be e.g. XXXXXX-100."""
+    cid = (client_id or "").strip()
+    if not cid:
+        return ""
+    if "-" not in cid:
+        return f"{cid}-100"
+    return cid
+
+
+def normalize_access_token(client_id: str, access_token: str) -> str:
+    """Strip accidental client_id: prefix so FyersModel does not double-prefix."""
+    token = (access_token or "").strip()
+    if not token:
+        return ""
+    cid = normalize_client_id(client_id)
+    if cid and token.startswith(f"{cid}:"):
+        return token[len(cid) + 1 :]
+    # Handle pasted Authorization header "APP-100:eyJ..."
+    if token.count(":") >= 2 and cid:
+        parts = token.split(":")
+        if len(parts) >= 3 and parts[0] == parts[1]:
+            return ":".join(parts[2:])
+    return token
+
+
+def fyers_authorization_header(client_id: str, access_token: str) -> str:
+    cid = normalize_client_id(client_id)
+    token = normalize_access_token(cid, access_token)
+    return f"{cid}:{token}"
+
+
+def resolve_fyers_auth() -> tuple[str, str] | None:
+    """Normalized (client_id, access_token) for API calls, or None."""
+    client_id, _, _ = resolve_app_credentials()
+    if not client_id:
+        return None
+    raw = get_stored_access_token()
+    if not raw:
+        return None
+    token = normalize_access_token(client_id, raw)
+    if not token:
+        return None
+    return client_id, token
 
 
 def save_token(resp: dict) -> None:
@@ -75,6 +121,12 @@ def save_token(resp: dict) -> None:
     path = token_file_path()
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     logger.info("Fyers token saved to %s", path.name)
+    try:
+        from app.services import fyers as fyers_module
+
+        fyers_module._auth_verified = False  # noqa: SLF001
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def import_fyers_token_bytes(content: bytes, filename: str) -> dict[str, object]:
@@ -299,8 +351,31 @@ def get_fyers_client():
         logger.info("Fyers token missing or expired — starting browser login")
         token = login_via_browser()
 
-    access_token = token["access_token"]
+    access_token = normalize_access_token(client_id, token["access_token"])
     return fyersModel.FyersModel(client_id=client_id, token=access_token, log_path="")
+
+
+def verify_fyers_connection() -> tuple[bool, str | None]:
+    """Call /profile to verify token + app id. Returns (ok, error_message)."""
+    auth = resolve_fyers_auth()
+    if not auth:
+        return False, "Fyers token missing or app id not configured"
+    client_id, access_token = auth
+    try:
+        import requests
+
+        header = fyers_authorization_header(client_id, access_token)
+        resp = requests.get(
+            "https://api-t1.fyers.in/api/v3/profile",
+            headers={"Authorization": header, "Content-Type": "application/json", "version": "3"},
+            timeout=15,
+        )
+        payload = resp.json()
+        if payload.get("s") == "ok":
+            return True, None
+        return False, str(payload.get("message") or payload)
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
 
 
 def ensure_access_token(*, force_login: bool = False) -> str | None:
@@ -315,7 +390,8 @@ def ensure_access_token(*, force_login: bool = False) -> str | None:
 
     stored = get_stored_access_token()
     if stored:
-        return stored
+        client_id, _, _ = resolve_app_credentials()
+        return normalize_access_token(client_id, stored)
 
     if login_in_progress():
         return None

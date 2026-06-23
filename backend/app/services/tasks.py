@@ -20,7 +20,9 @@ def run_full_pipeline(task_id: int, excel_path: str) -> None:
 
     try:
         mark_task_running(db, task)
-        counts = import_excel_workbook(db, excel_path)
+        import_counts = import_excel_workbook(db, excel_path)
+        refresh_counts = refresh_live_data(db, sync_fno=True)
+        counts = {**import_counts, **{f"live_{k}": v for k, v in refresh_counts.items()}}
         summary = ", ".join(f"{key}={value}" for key, value in counts.items())
         mark_task_success(db, task, summary)
         invalidate_universe_cache()

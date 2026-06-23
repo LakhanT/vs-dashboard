@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { DashboardResponse, FilterField, LivePriceTick, MarketDataStatus, SortLevel, Stats } from "./types";
+import type { DashboardResponse, FilterField, LivePriceTick, LiveRankSnapshotRow, MarketDataStatus, SortLevel, Stats } from "./types";
 import {
   fetchFilterFields,
   fetchMarketDataStatus,
@@ -34,6 +34,11 @@ import {
   downloadDashboardXlsx,
 } from "./exportDashboard";
 
+import {
+  formatPercentRatio,
+  isPercentRatioColumn,
+} from "./percentUtils";
+
 const PAGE_SIZES = [25, 50, 100];
 const MAX_SORT_LEVELS = 5;
 
@@ -48,6 +53,18 @@ const COLUMN_LABELS: Record<string, string> = {
   y_rank: "Y Rank",
   q_rank: "Q Rank",
   m_rank: "M Rank",
+  y_open: "Y Open",
+  y_high: "Y High",
+  y_low: "Y Low",
+  y_close: "Y Close",
+  q_open: "Q Open",
+  q_high: "Q High",
+  q_low: "Q Low",
+  q_close: "Q Close",
+  m_open: "M Open",
+  m_high: "M High",
+  m_low: "M Low",
+  m_close: "M Close",
   y_pct_change_open: "Y % Open",
   q_pct_change_open: "Q % Open",
   m_pct_change_open: "M % Open",
@@ -80,16 +97,8 @@ function formatCell(key: string, value: unknown) {
   if (value === null || value === undefined || value === "") return "—";
   if (typeof value === "boolean") return value ? "Yes" : "No";
   if (typeof value === "number") {
-    if (
-      key.includes("pct") ||
-      key.includes("retracement") ||
-      key.includes("green") ||
-      key.includes("rise") ||
-      key.includes("bullish") ||
-      key === "pct_change_today"
-    ) {
-      const pct = Math.abs(value) <= 1 ? value * 100 : value;
-      return `${pct.toFixed(2)}%`;
+    if (isPercentRatioColumn(key)) {
+      return formatPercentRatio(value);
     }
     return Number.isInteger(value) ? String(value) : value.toFixed(2);
   }
@@ -107,10 +116,9 @@ function columnLabel(col: string) {
 
 function pctClass(key: string, value: unknown) {
   if (typeof value !== "number") return "";
-  if (!key.includes("pct") && key !== "pct_change_today") return "";
-  const n = Math.abs(value) <= 1 ? value : value / 100;
-  if (n > 0) return "text-emerald-600";
-  if (n < 0) return "text-rose-600";
+  if (!isPercentRatioColumn(key)) return "";
+  if (value > 0) return "text-emerald-600";
+  if (value < 0) return "text-rose-600";
   return "";
 }
 
@@ -204,9 +212,49 @@ export default function App() {
     setLastTickAt(new Date().toLocaleTimeString());
   }, []);
 
+  const applyRankSnapshot = useCallback((rankRows: LiveRankSnapshotRow[]) => {
+    setData((prev) => {
+      if (!prev) return prev;
+      const byScrip = new Map(rankRows.map((r) => [r.scrip.toUpperCase(), r]));
+      const nextRows = prev.rows.map((row) => {
+        const scripKey = String(row.scrip ?? "").toUpperCase();
+        const ranks = byScrip.get(scripKey);
+        if (!ranks) return row;
+        return {
+          ...row,
+          y_rank: ranks.y_rank ?? row.y_rank,
+          q_rank: ranks.q_rank ?? row.q_rank,
+          m_rank: ranks.m_rank ?? row.m_rank,
+          y_open: ranks.y_open ?? row.y_open,
+          y_high: ranks.y_high ?? row.y_high,
+          y_low: ranks.y_low ?? row.y_low,
+          y_close: ranks.y_close ?? row.y_close,
+          q_open: ranks.q_open ?? row.q_open,
+          q_high: ranks.q_high ?? row.q_high,
+          q_low: ranks.q_low ?? row.q_low,
+          q_close: ranks.q_close ?? row.q_close,
+          m_open: ranks.m_open ?? row.m_open,
+          m_high: ranks.m_high ?? row.m_high,
+          m_low: ranks.m_low ?? row.m_low,
+          m_close: ranks.m_close ?? row.m_close,
+          y_pct_change_open: ranks.y_pct_change_open ?? row.y_pct_change_open,
+          q_pct_change_open: ranks.q_pct_change_open ?? row.q_pct_change_open,
+          m_pct_change_open: ranks.m_pct_change_open ?? row.m_pct_change_open,
+          y_high_retracement: ranks.y_high_retracement ?? row.y_high_retracement,
+          green_range: ranks.green_range ?? row.green_range,
+          retracement_from_high: ranks.retracement_from_high ?? row.retracement_from_high,
+          rise_from_low: ranks.rise_from_low ?? row.rise_from_low,
+          bullish_bo: ranks.bullish_bo ?? row.bullish_bo,
+        };
+      });
+      return { ...prev, rows: nextRows };
+    });
+  }, []);
+
   const { status: liveStatus, connected: liveConnected, refreshing: liveRefreshing } = useLivePrices(
     liveMode,
     applyPriceTicks,
+    applyRankSnapshot,
   );
 
   const loadDashboard = useCallback(

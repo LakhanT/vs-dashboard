@@ -13,14 +13,15 @@ from app.database import SessionLocal
 from app.db_write import commit_session, run_write_with_retry, serialized_write
 from app.services.dashboard_service import invalidate_universe_cache
 from app.services.market_data import fetch_fyers_quotes_for_stocks_parallel
+from app.services.live_ranking import live_ranking_cache, reload_live_ranking_cache
 from app.services.ranking_engine import patch_live_ltps_only, recalculate_rankings_from_db
 from app.services.universe import get_rsi_universe_stocks
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-RANK_RECALC_CHECK_SEC = 5
-RANK_RECALC_DEBOUNCE_SEC = 12
+RANK_BROADCAST_DEBOUNCE_SEC = 0.15
+RANK_DB_SYNC_INTERVAL_SEC = 30
 LTP_FLUSH_INTERVAL_SEC = 8
 UNIVERSE_REFRESH_SEC = 120
 
@@ -86,9 +87,12 @@ class LivePriceService:
         self._scrip_ltps: dict[str, dict] = {}
         self._scrip_to_live_id: dict[str, int] = {}
         self._ltp_cache_lock = threading.Lock()
-        self._rank_recalc_pending = False
-        self._rank_recalc_lock = threading.Lock()
-        self._last_rank_recalc_at: datetime | None = None
+        self._rank_broadcast_lock = threading.Lock()
+        self._rank_broadcast_timer: threading.Timer | None = None
+        self._last_rank_broadcast_revision = 0
+        self._rank_db_sync_pending = False
+        self._rank_db_sync_lock = threading.Lock()
+        self._last_rank_db_sync_at: datetime | None = None
         self._poll_in_flight = False
         self._poll_lock = threading.Lock()
 
@@ -131,6 +135,15 @@ class LivePriceService:
             self.status.parallel_workers = workers
 
         self._last_universe_refresh = datetime.now(timezone.utc).timestamp()
+
+        db = SessionLocal()
+        try:
+            reload_live_ranking_cache(db)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Live ranking cache reload failed: %s", exc)
+        finally:
+            db.close()
+
         logger.info(
             "Live price universe: %s scrips (%s parallel workers, batch %s)",
             len(scrips),
@@ -150,7 +163,7 @@ class LivePriceService:
         self._stop_event.clear()
         self.refresh_universe()
         if self._rank_thread is None or not self._rank_thread.is_alive():
-            self._rank_thread = threading.Thread(target=self._rank_loop, name="rank-recalc-loop", daemon=True)
+            self._rank_thread = threading.Thread(target=self._rank_db_sync_loop, name="rank-db-sync-loop", daemon=True)
             self._rank_thread.start()
         if self._poll_thread is None or not self._poll_thread.is_alive():
             self._poll_thread = threading.Thread(target=self._universe_poll_loop, name="universe-async-poll", daemon=True)
@@ -158,6 +171,8 @@ class LivePriceService:
         if self._flush_thread is None or not self._flush_thread.is_alive():
             self._flush_thread = threading.Thread(target=self._flush_loop, name="ltp-flush-loop", daemon=True)
             self._flush_thread.start()
+        if live_ranking_cache.loaded():
+            self._broadcast_rank_snapshot(live_ranking_cache.revision)
         logger.info("Live price service started (parallel async universe)")
 
     def stop(self) -> None:
@@ -198,8 +213,9 @@ class LivePriceService:
             except Full:
                 pass
 
-    def _record_tick(self, scrip: str, ltp: float, pct_change: float | None, source: str) -> None:
+    def _record_tick(self, scrip: str, ltp: float, pct_change: float | None, source: str) -> int | None:
         key = scrip.upper()
+        revision: int | None = None
         with self._ltp_cache_lock:
             self._scrip_ltps[key] = {
                 "ltp": ltp,
@@ -210,9 +226,43 @@ class LivePriceService:
             live_id = self._scrip_to_live_id.get(key)
             if live_id:
                 self._ltp_cache[live_id] = ltp
+                revision = live_ranking_cache.update_ltp(live_id, ltp)
+        return revision
+
+    def _schedule_rank_broadcast(self, revision: int | None) -> None:
+        if revision is None:
+            return
+        with self._rank_broadcast_lock:
+            if self._rank_broadcast_timer is not None:
+                self._rank_broadcast_timer.cancel()
+            self._rank_broadcast_timer = threading.Timer(
+                RANK_BROADCAST_DEBOUNCE_SEC,
+                self._broadcast_rank_snapshot,
+                args=(revision,),
+            )
+            self._rank_broadcast_timer.daemon = True
+            self._rank_broadcast_timer.start()
+
+    def _broadcast_rank_snapshot(self, revision: int) -> None:
+        if revision <= self._last_rank_broadcast_revision:
+            return
+        if live_ranking_cache.revision < revision:
+            revision = live_ranking_cache.revision
+        self._last_rank_broadcast_revision = revision
+        now = datetime.utcnow()
+        self._broadcast(
+            {
+                "type": "rank_snapshot",
+                "revision": revision,
+                "at": now.isoformat(),
+                "ranks": live_ranking_cache.snapshot_payload(),
+            }
+        )
 
     def _emit_tick(self, scrip: str, ltp: float, pct_change: float | None, source: str) -> None:
-        self._record_tick(scrip, ltp, pct_change, source)
+        revision = self._record_tick(scrip, ltp, pct_change, source)
+        self._schedule_rank_broadcast(revision)
+        self._mark_rank_db_sync_pending()
         now = datetime.utcnow()
         self._broadcast(
             {
@@ -231,9 +281,9 @@ class LivePriceService:
             }
         )
 
-    def _mark_rank_recalc_pending(self) -> None:
-        with self._rank_recalc_lock:
-            self._rank_recalc_pending = True
+    def _mark_rank_db_sync_pending(self) -> None:
+        with self._rank_db_sync_lock:
+            self._rank_db_sync_pending = True
 
     def _flush_loop(self) -> None:
         while not self._stop_event.is_set():
@@ -252,7 +302,8 @@ class LivePriceService:
                     commit_session(db, label="ltp flush")
 
                 run_write_with_retry(_flush, label="ltp flush")
-                self._mark_rank_recalc_pending()
+                live_ranking_cache.update_ltps(batch)
+                self._mark_rank_db_sync_pending()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("LTP flush failed: %s", exc)
                 db.rollback()
@@ -288,18 +339,50 @@ class LivePriceService:
                 updated += 1
 
         try:
-            fetch_fyers_quotes_for_stocks_parallel(
+            from app.services.fyers_auth import ensure_access_token
+
+            if not ensure_access_token():
+                with self.status._lock:
+                    self.status.last_error = "Fyers token missing or expired — re-login via Data panel"
+                logger.warning("Fyers quotes skipped: no valid access token")
+                return 0
+
+            quotes_map = fetch_fyers_quotes_for_stocks_parallel(
                 db,
                 stocks,
                 max_workers=settings.live_price_parallel_workers,
                 on_batch=_on_batch,
             )
 
+            if not quotes_map and stocks:
+                logger.warning(
+                    "Fyers returned 0/%s quotes — trying Yahoo fallback (check Fyers token & symbols)",
+                    len(stocks),
+                )
+                from app.services.market_data import fetch_live_quotes_for_stocks
+
+                quotes_map = fetch_live_quotes_for_stocks(db, stocks)
+                for stock_id, quote in quotes_map.items():
+                    stock = id_to_stock.get(stock_id)
+                    if stock is None or quote.ltp is None:
+                        continue
+                    ltp_by_stock[stock_id] = quote.ltp
+                    self._emit_tick(
+                        stock.scrip,
+                        quote.ltp,
+                        quote.pct_change,
+                        getattr(quote, "source", None) or "yahoo_fallback",
+                    )
+                    updated += 1
+
             if ltp_by_stock:
+                live_ranking_cache.update_ltps(ltp_by_stock)
                 with serialized_write():
                     patch_live_ltps_only(db, ltp_by_stock)
+                    recalculate_rankings_from_db(db)
                     commit_session(db, label="async universe refresh")
-                self._mark_rank_recalc_pending()
+                    invalidate_universe_cache()
+                self._broadcast_rank_snapshot(live_ranking_cache.revision)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Parallel universe fetch failed: %s", exc)
             with self.status._lock:
@@ -372,10 +455,13 @@ class LivePriceService:
                     updated += 1
 
             if persist and ltp_by_stock:
+                revision = live_ranking_cache.update_ltps(ltp_by_stock)
                 with serialized_write():
                     patch_live_ltps_only(db, ltp_by_stock)
+                    recalculate_rankings_from_db(db)
                     commit_session(db, label="refresh quotes")
-                self._mark_rank_recalc_pending()
+                    invalidate_universe_cache()
+                self._broadcast_rank_snapshot(revision or live_ranking_cache.revision)
 
             with self.status._lock:
                 self.status.last_quote_source = "fyers_async"
@@ -428,31 +514,32 @@ class LivePriceService:
             if self._stop_event.wait(sleep_for):
                 break
 
-    def _rank_loop(self) -> None:
+    def _rank_db_sync_loop(self) -> None:
+        """Persist in-memory live ranks to DB periodically (backup between poll cycles)."""
         while not self._stop_event.is_set():
-            if self._stop_event.wait(RANK_RECALC_CHECK_SEC):
+            if self._stop_event.wait(5):
                 break
 
-            with self._rank_recalc_lock:
-                if not self._rank_recalc_pending:
+            with self._rank_db_sync_lock:
+                if not self._rank_db_sync_pending:
                     continue
-                last_at = self._last_rank_recalc_at
-            if last_at and (datetime.utcnow() - last_at).total_seconds() < RANK_RECALC_DEBOUNCE_SEC:
+                last_at = self._last_rank_db_sync_at
+            if last_at and (datetime.utcnow() - last_at).total_seconds() < RANK_DB_SYNC_INTERVAL_SEC:
                 continue
 
             db = SessionLocal()
             try:
-                def _recalc() -> None:
+                def _sync() -> None:
                     recalculate_rankings_from_db(db)
-                    commit_session(db, label="rank recalc")
+                    commit_session(db, label="rank db sync")
                     invalidate_universe_cache()
 
-                run_write_with_retry(_recalc, label="rank recalc")
-                with self._rank_recalc_lock:
-                    self._rank_recalc_pending = False
-                    self._last_rank_recalc_at = datetime.utcnow()
+                run_write_with_retry(_sync, label="rank db sync")
+                with self._rank_db_sync_lock:
+                    self._rank_db_sync_pending = False
+                    self._last_rank_db_sync_at = datetime.utcnow()
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Background rank recalc failed: %s", exc)
+                logger.warning("Background rank DB sync failed: %s", exc)
                 db.rollback()
             finally:
                 db.close()

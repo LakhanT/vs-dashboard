@@ -11,8 +11,11 @@ from app.models import Stock
 from app.services.fyers_auth import (
     auth_status,
     ensure_access_token,
+    fyers_authorization_header,
     resolve_app_credentials,
+    resolve_fyers_auth,
     start_login_in_background,
+    verify_fyers_connection,
 )
 from app.services.symbol_utils import to_fyers_symbol
 from app.services.yahoo import LiveQuote
@@ -20,7 +23,10 @@ from app.services.yahoo import LiveQuote
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-BATCH_SIZE = 50
+MAX_SYMBOLS_PER_REQUEST = 50
+FYERS_DATA_QUOTES_URL = "https://api-t1.fyers.in/data/quotes"
+
+_auth_verified = False
 
 
 def get_access_token(*, force_refresh: bool = False) -> str | None:
@@ -47,6 +53,30 @@ def _register_symbol(symbol_to_id: dict[str, int], fyers_symbol: str, stock_id: 
         symbol_to_id[short.upper()] = stock_id
 
 
+def _valid_fyers_symbol(symbol: str) -> bool:
+    if not symbol or ":" not in symbol:
+        return False
+    exchange, short = symbol.split(":", 1)
+    if exchange not in ("NSE", "BSE") or not short:
+        return False
+    return short.endswith("-EQ")
+
+
+def _normalize_symbols(symbols: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for symbol in symbols:
+        text = str(symbol).strip()
+        if not _valid_fyers_symbol(text):
+            continue
+        key = text.upper()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+    return out
+
+
 def _resolve_stock_id(symbol_to_id: dict[str, int], fyers_symbol: str | None) -> int | None:
     if not fyers_symbol:
         return None
@@ -68,16 +98,10 @@ def _fetch_symbols_batch(
     symbols: list[str],
     symbol_to_id: dict[str, int],
 ) -> dict[int, LiveQuote]:
+    symbols = _normalize_symbols(symbols)
     if not symbols:
         return {}
-    try:
-        from fyers_apiv3 import fyersModel
-
-        fyers = fyersModel.FyersModel(client_id=client_id, token=access_token, log_path="")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Fyers client init failed: %s", exc)
-        return {}
-    return _fetch_batch_fyers(fyers, symbols, symbol_to_id)
+    return _fetch_batch_fyers_resilient(client_id, access_token, symbols, symbol_to_id)
 
 
 def fetch_live_quotes_parallel(
@@ -91,27 +115,42 @@ def fetch_live_quotes_parallel(
     if not stocks or not fyers_configured():
         return {}
 
-    access_token = ensure_access_token()
-    if not access_token:
+    global _auth_verified  # noqa: PLW0603
+
+    auth = resolve_fyers_auth()
+    if not auth:
         logger.debug("Fyers quotes skipped — no access token")
         return {}
+    client_id, access_token = auth
 
-    client_id, _, _ = resolve_app_credentials()
+    if not _auth_verified:
+        ok, err = verify_fyers_connection()
+        if not ok:
+            logger.error("Fyers auth check failed: %s — re-upload token.json or login again", err)
+            return {}
+        _auth_verified = True
+        logger.info("Fyers auth verified for app %s", client_id[:8] + "…")
+
     symbol_to_id: dict[str, int] = {}
     for stock in stocks:
         symbol = to_fyers_symbol(stock)
-        if symbol:
+        if symbol and _valid_fyers_symbol(symbol):
             _register_symbol(symbol_to_id, symbol, stock.id)
 
-    all_symbols = list({s for s in symbol_to_id if ":" in s})
+    all_symbols = _normalize_symbols(list(symbol_to_id.keys()))
     if not all_symbols:
+        logger.warning("Fyers quotes: no valid symbols for %s stocks", len(stocks))
         return {}
 
-    chunk = max(1, batch_size or settings.live_price_batch_size)
+    chunk = min(
+        MAX_SYMBOLS_PER_REQUEST,
+        max(1, batch_size or settings.live_price_batch_size),
+    )
     symbol_batches = [all_symbols[i : i + chunk] for i in range(0, len(all_symbols), chunk)]
-    workers = max(1, max_workers or settings.live_price_parallel_workers)
+    workers = max(1, min(max_workers or settings.live_price_parallel_workers, len(symbol_batches)))
 
     quotes: dict[int, LiveQuote] = {}
+    failed_batches = 0
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="fyers-quotes") as executor:
         futures = [
             executor.submit(_fetch_symbols_batch, client_id, access_token, batch, symbol_to_id)
@@ -121,9 +160,11 @@ def fetch_live_quotes_parallel(
             try:
                 batch_quotes = future.result()
             except Exception as exc:  # noqa: BLE001
+                failed_batches += 1
                 logger.warning("Fyers parallel batch failed: %s", exc)
                 continue
             if not batch_quotes:
+                failed_batches += 1
                 continue
             quotes.update(batch_quotes)
             if on_batch:
@@ -134,14 +175,20 @@ def fetch_live_quotes_parallel(
 
     if quotes:
         logger.info(
-            "Fyers parallel quotes: %s/%s symbols (%s batches, %s workers)",
+            "Fyers parallel quotes: %s/%s stocks (%s symbols, %s batches, %s workers)",
             len(quotes),
             len(stocks),
+            len(all_symbols),
             len(symbol_batches),
             workers,
         )
     elif stocks:
-        logger.debug("Fyers returned no quotes for %s symbols", len(stocks))
+        logger.warning(
+            "Fyers returned no quotes for %s stocks (%s batches failed of %s)",
+            len(stocks),
+            failed_batches,
+            len(symbol_batches),
+        )
     return quotes
 
 
@@ -150,22 +197,23 @@ def fetch_live_quotes_sequential(stocks: list[Stock]) -> dict[int, LiveQuote]:
     if not stocks or not fyers_configured():
         return {}
 
-    access_token = ensure_access_token()
-    if not access_token:
+    client_id, _, _ = resolve_app_credentials()
+    auth = resolve_fyers_auth()
+    if not auth:
         return {}
 
-    client_id, _, _ = resolve_app_credentials()
+    client_id, access_token = auth
     symbol_to_id: dict[str, int] = {}
     for stock in stocks:
         symbol = to_fyers_symbol(stock)
-        if symbol:
+        if symbol and _valid_fyers_symbol(symbol):
             _register_symbol(symbol_to_id, symbol, stock.id)
 
-    all_symbols = list({s for s in symbol_to_id if ":" in s})
+    all_symbols = _normalize_symbols(list(symbol_to_id.keys()))
     if not all_symbols:
         return {}
 
-    chunk = max(1, settings.live_price_batch_size)
+    chunk = min(MAX_SYMBOLS_PER_REQUEST, max(1, settings.live_price_batch_size))
     quotes: dict[int, LiveQuote] = {}
     for start in range(0, len(all_symbols), chunk):
         batch = all_symbols[start : start + chunk]
@@ -173,19 +221,35 @@ def fetch_live_quotes_sequential(stocks: list[Stock]) -> dict[int, LiveQuote]:
     return quotes
 
 
-def _fetch_batch_fyers(fyers, symbols: list[str], symbol_to_id: dict[str, int]) -> dict[int, LiveQuote]:
-    try:
-        response = fyers.quotes({"symbols": ",".join(symbols)})
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Fyers quotes request failed: %s", exc)
+def _fetch_batch_fyers_resilient(
+    client_id: str,
+    access_token: str,
+    symbols: list[str],
+    symbol_to_id: dict[str, int],
+) -> dict[int, LiveQuote]:
+    """Fetch quotes; on Bad Request split batch to isolate invalid symbols."""
+    symbols = _normalize_symbols(symbols)
+    if not symbols:
         return {}
 
-    if response.get("s") != "ok":
-        logger.warning("Fyers quotes error: %s", response.get("message", response))
+    quotes, ok, _err = _fetch_batch_fyers_http(client_id, access_token, symbols, symbol_to_id)
+    if ok:
+        return quotes
+
+    if len(symbols) == 1:
+        logger.debug("Fyers no quote for symbol: %s", symbols[0])
         return {}
 
+    mid = len(symbols) // 2
+    left = _fetch_batch_fyers_resilient(client_id, access_token, symbols[:mid], symbol_to_id)
+    right = _fetch_batch_fyers_resilient(client_id, access_token, symbols[mid:], symbol_to_id)
+    left.update(right)
+    return left
+
+
+def _parse_quote_items(items: list, symbol_to_id: dict[str, int]) -> dict[int, LiveQuote]:
     quotes: dict[int, LiveQuote] = {}
-    for item in response.get("d", []):
+    for item in items:
         if not isinstance(item, dict):
             continue
         fyers_symbol = item.get("n") or item.get("symbol")
@@ -217,8 +281,81 @@ def _fetch_batch_fyers(fyers, symbols: list[str], symbol_to_id: dict[str, int]) 
             week_52_low=_to_float(values.get("low_price")),
             source="fyers",
         )
-
     return quotes
+
+
+def _fetch_batch_fyers_http(
+    client_id: str,
+    access_token: str,
+    symbols: list[str],
+    symbol_to_id: dict[str, int],
+) -> tuple[dict[int, LiveQuote], bool, str | None]:
+    if not symbols:
+        return {}, True, None
+
+    if len(symbols) > MAX_SYMBOLS_PER_REQUEST:
+        symbols = symbols[:MAX_SYMBOLS_PER_REQUEST]
+
+    try:
+        import requests
+
+        header = fyers_authorization_header(client_id, access_token)
+        resp = requests.get(
+            FYERS_DATA_QUOTES_URL,
+            params={"symbols": ",".join(symbols)},
+            headers={
+                "Authorization": header,
+                "Content-Type": "application/json",
+                "version": "3",
+            },
+            timeout=20,
+        )
+        try:
+            payload = resp.json()
+        except Exception:
+            return {}, False, f"HTTP {resp.status_code}: non-JSON body"
+
+        if payload.get("s") != "ok":
+            message = payload.get("message", payload)
+            code = payload.get("code")
+            detail = f"{message} (code={code}, http={resp.status_code})"
+            if len(symbols) <= 3:
+                logger.warning("Fyers quotes error: %s — symbols: %s", detail, symbols)
+            else:
+                logger.warning(
+                    "Fyers quotes error: %s — batch size %s (first: %s)",
+                    detail,
+                    len(symbols),
+                    symbols[0],
+                )
+            return {}, False, str(message)
+
+        quotes = _parse_quote_items(payload.get("d", []), symbol_to_id)
+        return quotes, True, None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Fyers quotes HTTP failed (%s symbols): %s", len(symbols), exc)
+        return {}, False, str(exc)
+
+
+def _fetch_batch_fyers(
+    fyers,
+    symbols: list[str],
+    symbol_to_id: dict[str, int],
+) -> tuple[dict[int, LiveQuote], bool]:
+    """SDK fallback — prefer _fetch_batch_fyers_http."""
+    if not symbols:
+        return {}, True
+
+    try:
+        response = fyers.quotes({"symbols": ",".join(symbols)})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Fyers SDK quotes failed (%s symbols): %s", len(symbols), exc)
+        return {}, False
+
+    if response.get("s") != "ok":
+        return {}, False
+
+    return _parse_quote_items(response.get("d", []), symbol_to_id), True
 
 
 def _to_float(value) -> float | None:
@@ -232,10 +369,13 @@ def _to_float(value) -> float | None:
 
 def get_fyers_status() -> dict:
     status = auth_status()
+    auth_ok, auth_error = verify_fyers_connection()
     return {
         "configured": status["app_configured"],
         "client_id_set": status["app_configured"],
         "token_ready": status["token_ready"],
+        "auth_verified": auth_ok,
+        "auth_error": auth_error,
         "login_in_progress": status["login_in_progress"],
         "redirect_uri": status["redirect_uri"],
         "expires_at": status["expires_at"],

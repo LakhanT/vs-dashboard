@@ -27,8 +27,8 @@ class Settings(BaseSettings):
     fyers_redirect_uri: str = "http://127.0.0.1:5000/callback"
     live_price_enabled: bool = True
     live_price_interval_sec: int = 5  # pause between full-universe refresh cycles
-    live_price_batch_size: int = 50  # symbols per Fyers HTTP quotes request
-    live_price_parallel_workers: int = 10  # concurrent Fyers quote requests
+    live_price_batch_size: int = 20  # symbols per Fyers HTTP quotes request (max 50)
+    live_price_parallel_workers: int = 4  # concurrent Fyers quote requests
 
     @property
     def cors_origin_list(self) -> list[str]:

@@ -1,4 +1,5 @@
 import type { FilterField, FilterRule } from "./types";
+import { displayPercentToRatio } from "./percentUtils";
 
 /** Excel sheet names → API filter groups */
 export const SHEET_GROUPS: { key: string; label: string }[] = [
@@ -142,7 +143,7 @@ export function setLtpFilterMode(inputs: SheetFilterState, mode: "all" | "has" |
 function coercePercentValue(field: FilterField, raw: string): number | null {
   const n = Number(raw);
   if (Number.isNaN(n)) return null;
-  if (field.type === "percent" && Math.abs(n) > 1) return n / 100;
+  if (field.type === "percent") return displayPercentToRatio(n);
   return n;
 }
 
@@ -199,6 +200,18 @@ export const ALL_TABLE_COLUMNS = [
   "y_rank",
   "q_rank",
   "m_rank",
+  "y_open",
+  "y_high",
+  "y_low",
+  "y_close",
+  "q_open",
+  "q_high",
+  "q_low",
+  "q_close",
+  "m_open",
+  "m_high",
+  "m_low",
+  "m_close",
   "y_pct_change_open",
   "q_pct_change_open",
   "m_pct_change_open",
